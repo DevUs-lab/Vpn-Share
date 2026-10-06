@@ -72,8 +72,12 @@ export default function App() {
     } else {
       ProxyModule.startProxy();
       setOn(true);
-      refresh();
     }
+    // Service ko start/stop hone mein thora waqt lagta hai. Turant refresh
+    // karne se isRunning() false de kar UI wapas "Stopped" dikha deta tha.
+    setTimeout(() => {
+      refresh();
+    }, 800);
   };
 
   const others = net.ips.filter(ip => ip !== net.hotspotIp);

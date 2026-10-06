@@ -24,7 +24,7 @@ class ProxyServer(private val port: Int) {
     @Volatile private var server: ServerSocket? = null
 
     val isRunning: Boolean
-        get() = running
+        get() = running && server?.isBound == true
 
     fun start() {
         if (running) return
@@ -139,9 +139,45 @@ class ProxyServer(private val port: Int) {
         }
 
         val remote = Socket()
-        remote.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+        val socksOk = connect(remote, host, port) {
+            out.write(byteArrayOf(5, 5, 0, 1, 0, 0, 0, 0, 0, 0)) // REP=5 refused
+            out.flush()
+        }
+        if (!socksOk) {
+            client.close()
+            return null
+        }
         out.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0))
         return remote
+    }
+
+    /**
+     * @return true agar connection ban gaya. Fail hone par [failReply] se client
+     * ko jawab jata hai (warna client sirf "band ho gaya" dekhta hai).
+     */
+    private fun connect(
+        remote: Socket,
+        host: String,
+        port: Int,
+        failReply: () -> Unit,
+    ): Boolean = try {
+        remote.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+        true
+    } catch (e: Exception) {
+        try {
+            failReply()
+        } catch (ignore: Exception) {
+        }
+        try {
+            remote.close()
+        } catch (ignore: Exception) {
+        }
+        false
+    }
+
+    private fun httpReply(out: OutputStream, text: String) {
+        out.write(text.toByteArray(Charsets.ISO_8859_1))
+        out.flush()
     }
 
     /**
@@ -167,8 +203,10 @@ class ProxyServer(private val port: Int) {
         val headers = lines.drop(1).filter {
             it.isNotEmpty() &&
                 !it.startsWith("Proxy-Connection:", true) &&
-                !it.startsWith("Proxy-Authorization:", true)
-        }
+                !it.startsWith("Proxy-Authorization:", true) &&
+                !it.startsWith("Connection:", true) &&
+                !it.startsWith("Keep-Alive:", true)
+        } + "Connection: close"
 
         val remote = Socket()
 
@@ -177,9 +215,14 @@ class ProxyServer(private val port: Int) {
             val target = parts[1]
             val host = target.substringBefore(':')
             val port = target.substringAfter(':', "443").toIntOrNull() ?: 443
-            remote.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-            out.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
-            out.flush()
+            val tunnelOk = connect(remote, host, port) {
+                httpReply(out, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+            }
+            if (!tunnelOk) {
+                client.close()
+                return null
+            }
+            httpReply(out, "HTTP/1.1 200 Connection Established\r\n\r\n")
             return remote
         }
 
@@ -210,9 +253,17 @@ class ProxyServer(private val port: Int) {
             return null
         }
 
-        remote.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+        val getOk = connect(remote, host, port) {
+            httpReply(out, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+        }
+        if (!getOk) {
+            client.close()
+            return null
+        }
 
-        // Origin-form request line bana kar bhejte hain (proxy wali line nahi)
+        // Origin-form request line bana kar bhejte hain (proxy wali line nahi).
+        // "Connection: close" se har request naye connection par jati hai,
+        // warna doosri request bhi purane server ko chali jati.
         val firstLine = "${parts[0]} $path ${parts[2]}"
         val outbound = firstLine + "\r\n" + headers.joinToString("\r\n") + "\r\n\r\n"
         remote.getOutputStream().write(outbound.toByteArray(Charsets.ISO_8859_1))

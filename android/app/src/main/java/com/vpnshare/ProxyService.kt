@@ -7,24 +7,25 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 
 class ProxyService : Service() {
 
-    private var proxy: ProxyServer? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val channelId = "proxy_channel"
         val nm = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            if (nm.getNotificationChannel(channelId) == null) {
-                nm.createNotificationChannel(
-                    NotificationChannel(
-                        channelId,
-                        "Proxy",
-                        NotificationManager.IMPORTANCE_LOW,
-                    ),
-                )
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            nm.getNotificationChannel(channelId) == null
+        ) {
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    channelId,
+                    "Proxy",
+                    NotificationManager.IMPORTANCE_LOW,
+                ),
+            )
         }
 
         // Channels sirf API 26+ par hain, is liye purane Android par doosra constructor
@@ -36,7 +37,7 @@ class ProxyService : Service() {
         }
         val notif = builder
             .setContentTitle("VPN Share running")
-            .setContentText("SOCKS5 proxy on port $PORT")
+            .setContentText("HTTP + SOCKS5 proxy on port $PORT")
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setOngoing(true)
             .build()
@@ -44,17 +45,34 @@ class ProxyService : Service() {
         // Manifest mein foregroundServiceType="specialUse" declare hai
         startForeground(NOTIFICATION_ID, notif)
 
-        if (proxy?.isRunning != true) {
-            proxy = ProxyServer(PORT).also { it.start() }
+        // Screen band ho to bhi CPU chalta rahe, warna doosre device ki
+        // requests der se jawab milta hain (ya doze mein ruk jati hain)
+        if (wakeLock?.isHeld != true) {
+            wakeLock = getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VpnShare:proxy")
+                .apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
         }
-        isRunning = true
+
+        // Agar port 1080 pehle se le liya gaya ho to server start nahi hoga.
+        // isRunning server ki asal haalat se aata hai, is liye app ghalti se
+        // "Running" nahi dikhayegi.
+        if (current?.isRunning != true) {
+            current = ProxyServer(PORT).also { it.start() }
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        proxy?.stop()
-        proxy = null
-        isRunning = false
+        current?.stop()
+        current = null
+        try {
+            wakeLock?.release()
+        } catch (ignore: Exception) {
+        }
+        wakeLock = null
         super.onDestroy()
     }
 
@@ -65,7 +83,13 @@ class ProxyService : Service() {
         private const val NOTIFICATION_ID = 1
 
         @Volatile
-        var isRunning = false
-            private set
+        private var current: ProxyServer? = null
+
+        /**
+         * Server ki asal haalat (bind fail ho to false).
+         * ProxyModule aur UI isi se poochte hain.
+         */
+        val isRunning: Boolean
+            get() = current?.isRunning == true
     }
 }

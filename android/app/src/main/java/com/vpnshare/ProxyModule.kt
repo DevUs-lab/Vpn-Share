@@ -165,6 +165,9 @@ class ProxyModule(private val ctx: ReactApplicationContext) :
             return
         }
         val activity = ctx.currentActivity ?: return
-        activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+        // Permission UI thread par maangni chahiye
+        activity.runOnUiThread {
+            activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+        }
     }
 }
